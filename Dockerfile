@@ -1,9 +1,9 @@
 FROM python:3.12-slim-bookworm
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# 安装Node.js
+# 安装 Node.js 与 tini（回收孤儿/僵尸进程，不重启 API）
 RUN apt-get update && \
-    apt-get install -y curl && \
+    apt-get install -y curl tini && \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
     apt-get install -y nodejs && \
     apt-get clean && \
@@ -31,5 +31,6 @@ RUN chmod +x start.sh
 # 暴露端口
 EXPOSE 8194
 
-# 使用启动脚本替代直接的 uvicorn 命令
+# tini 作为 PID 1，仅负责信号转发与僵尸回收；uvicorn 保持单进程常驻
+ENTRYPOINT ["tini", "--"]
 CMD ["./start.sh"]

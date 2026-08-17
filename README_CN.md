@@ -36,6 +36,8 @@ docker容器的日志
 - 第三方依赖安装与官方一致，将需要的依赖放入`/docker/volumes/sandbox/dependencies/python-requirements.txt`，重启sandbox即可。
 - 镜像只有fastapi相关的依赖，任何你需要的依赖，需要自己加到python-requirements.txt中。
 - 支持环境变量配置 `PIP_MIRROR_URL`。如果你是中国去用户可以配置 `PIP_MIRROR_URL=https://pypi.tuna.tsinghua.edu.cn/simple`
+- 每次代码执行都在独立子进程（进程组）中运行；API 进程常驻，不会因 worker 回收导致服务中断。
+- 可选环境变量：`WORKER_TIMEOUT`（秒，默认 15）、`MAX_WORKERS`（并发数，默认 10）、`MAX_MEMORY_MB`（单次任务地址空间上限，未设置则不限制）、`API_KEY`、`PIP_MIRROR_URL`
 
 
 

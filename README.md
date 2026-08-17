@@ -36,3 +36,5 @@ Docker container logs
 - Using UV as the dependency manager for faster package installation, allowing millisecond-level dependency installation on restart
 - Third-party dependencies can be installed following the official method: simply add required dependencies to `/docker/volumes/sandbox/dependencies/python-requirements.txt` and restart the sandbox
 - The image only contains FastAPI-related dependencies. Any additional dependencies you need must be manually added to python-requirements.txt
+- Each code run executes in an isolated subprocess (process group). The API process is not recycled, so there is no downtime from worker restarts.
+- Optional env: `WORKER_TIMEOUT` (seconds, default 15), `MAX_WORKERS` (concurrent runs, default 10), `MAX_MEMORY_MB` (per-job address space limit, unset = no limit), `API_KEY`, `PIP_MIRROR_URL`

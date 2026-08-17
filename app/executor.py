@@ -1,137 +1,260 @@
 import asyncio
-import sys
-import io
-import tempfile
+import json
 import os
+import signal
 import subprocess
-from contextlib import redirect_stdout, redirect_stderr
-from typing import Dict, Any
-from concurrent.futures import ProcessPoolExecutor
+import sys
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, Optional, Set
 
-def _run_python_code_in_process(code: str) -> Dict[str, Any]:
-    """在进程中执行Python代码的函数"""
-    stdout_buffer = io.StringIO()
-    stderr_buffer = io.StringIO()
-    
+_RUNNER_PATH = str(Path(__file__).with_name("python_runner.py"))
+
+
+def _pdeathsig() -> None:
+    """Kill this process if its parent dies (e.g. API process crash)."""
     try:
-        with redirect_stdout(stdout_buffer), redirect_stderr(stderr_buffer):
-            global_namespace = {}
-            exec(code, global_namespace)
-            
-        return {
-            "success": True,
-            "output": stdout_buffer.getvalue(),
-            "error": stderr_buffer.getvalue() or None
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "output": stdout_buffer.getvalue(),
-            "error": str(e)
-        }
-    finally:
-        stdout_buffer.close()
-        stderr_buffer.close()
+        import ctypes
 
-def _run_nodejs_code_in_process(code: str) -> Dict[str, Any]:
-    """在进程中执行Node.js代码的函数"""
+        libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        PR_SET_PDEATHSIG = 1
+        libc.prctl(PR_SET_PDEATHSIG, signal.SIGKILL)
+    except Exception:
+        pass
+
+
+def _apply_memory_limit(max_memory_bytes: Optional[int]) -> None:
+    if not max_memory_bytes:
+        return
     try:
-        # 创建临时文件来存储JavaScript代码
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False) as temp_file:
-            temp_file.write(code)
-            temp_file_path = temp_file.name
+        import resource
 
-        # 使用Node.js执行代码
-        process = subprocess.Popen(
-            ['node', temp_file_path],
+        resource.setrlimit(
+            resource.RLIMIT_AS, (max_memory_bytes, max_memory_bytes)
+        )
+    except Exception:
+        pass
+
+
+def _job_preexec(max_memory_bytes: Optional[int] = None):
+    def _inner() -> None:
+        _pdeathsig()
+        _apply_memory_limit(max_memory_bytes)
+
+    return _inner
+
+
+def _kill_process_group(pid: Optional[int]) -> None:
+    if pid is None:
+        return
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def check_nodejs_available() -> bool:
+    try:
+        subprocess.run(
+            ["node", "--version"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True
+            check=True,
         )
-        
-        stdout, stderr = process.communicate()
-        
-        # 删除临时文件
-        os.unlink(temp_file_path)
-        
-        if process.returncode == 0:
-            return {
-                "success": True,
-                "output": stdout,
-                "error": None
-            }
-        else:
-            return {
-                "success": False,
-                "output": stdout,
-                "error": stderr
-            }
-    except Exception as e:
-        return {
-            "success": False,
-            "output": "",
-            "error": str(e)
-        }
-
-def check_nodejs_available():
-    """检查Node.js是否可用"""
-    try:
-        subprocess.run(['node', '--version'], 
-                      stdout=subprocess.PIPE, 
-                      stderr=subprocess.PIPE, 
-                      check=True)
         return True
     except (subprocess.SubprocessError, FileNotFoundError):
         return False
 
-class CodeExecutor:
-    def __init__(self, timeout: int = 30, max_workers: int = 10):
-        self.timeout = timeout
-        self.process_pool = ProcessPoolExecutor(max_workers=max_workers)
-        self.nodejs_available = check_nodejs_available()
-    
-    async def shutdown(self):
-        """关闭进程池"""
-        self.process_pool.shutdown(wait=True)
 
-    async def execute(self, code: str, language: str = "python3") -> Dict[str, Any]:
+class CodeExecutor:
+    def __init__(
+        self,
+        timeout: int = 30,
+        max_memory_mb: Optional[int] = None,
+    ):
+        self.timeout = timeout
+        self.max_memory_bytes = (
+            int(max_memory_mb) * 1024 * 1024 if max_memory_mb else None
+        )
+        self.nodejs_available = check_nodejs_available()
+        self._procs: Set[asyncio.subprocess.Process] = set()
+        self._lock = asyncio.Lock()
+
+    async def shutdown(self) -> None:
+        async with self._lock:
+            procs = list(self._procs)
+        for proc in procs:
+            if proc.returncode is None:
+                _kill_process_group(proc.pid)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    pass
+
+    async def _track(self, proc: asyncio.subprocess.Process) -> None:
+        async with self._lock:
+            self._procs.add(proc)
+
+    async def _untrack(self, proc: asyncio.subprocess.Process) -> None:
+        async with self._lock:
+            self._procs.discard(proc)
+
+    async def _run_job(
+        self,
+        args: list,
+        timeout_message: str,
+    ) -> Dict[str, Any]:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+            preexec_fn=_job_preexec(self.max_memory_bytes),
+        )
+        await self._track(proc)
+        timed_out = False
         try:
-            loop = asyncio.get_event_loop()
-            
-            if language == "python3":
-                executor_func = _run_python_code_in_process
-            elif language == "nodejs":
-                if not self.nodejs_available:
-                    return {
-                        "success": False,
-                        "output": "",
-                        "error": "Node.js未安装或不可用"
-                    }
-                executor_func = _run_nodejs_code_in_process
-            else:
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.timeout
+                )
+            except asyncio.TimeoutError:
+                timed_out = True
+                _kill_process_group(proc.pid)
+                try:
+                    stdout_b, stderr_b = await asyncio.wait_for(
+                        proc.communicate(), timeout=1
+                    )
+                except asyncio.TimeoutError:
+                    stdout_b, stderr_b = b"", b""
+        finally:
+            if proc.returncode is None:
+                _kill_process_group(proc.pid)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=1)
+                except (asyncio.TimeoutError, ProcessLookupError):
+                    pass
+            await self._untrack(proc)
+
+        if timed_out:
+            return {
+                "success": False,
+                "output": (stdout_b or b"").decode("utf-8", errors="replace"),
+                "error": timeout_message,
+            }
+
+        stdout = (stdout_b or b"").decode("utf-8", errors="replace")
+        stderr = (stderr_b or b"").decode("utf-8", errors="replace")
+        return {
+            "success": proc.returncode == 0,
+            "output": stdout,
+            "error": None if proc.returncode == 0 else stderr,
+            "returncode": proc.returncode,
+        }
+
+    async def _run_python(self, code: str) -> Dict[str, Any]:
+        code_path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".py",
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                f.write(code)
+                code_path = f.name
+
+            raw = await self._run_job(
+                [sys.executable, _RUNNER_PATH, code_path],
+                f"代码执行超时 (>{self.timeout}秒)",
+            )
+            if not raw["success"] and raw.get("error", "").startswith(
+                "代码执行超时"
+            ):
                 return {
                     "success": False,
                     "output": "",
-                    "error": f"不支持的语言: {language}"
+                    "error": raw["error"],
                 }
-            
-            future = loop.run_in_executor(
-                self.process_pool,
-                executor_func,
-                code
-            )
-            result = await asyncio.wait_for(future, timeout=self.timeout)
-            return result
 
-        except asyncio.TimeoutError:
+            # Runner prints a JSON result on stdout; preserve prior API shape.
+            if raw.get("returncode") == 0 or raw["output"]:
+                try:
+                    result = json.loads(raw["output"] or "")
+                    return {
+                        "success": bool(result.get("success")),
+                        "output": result.get("output") or "",
+                        "error": result.get("error"),
+                    }
+                except json.JSONDecodeError:
+                    if raw["success"]:
+                        return {
+                            "success": False,
+                            "output": raw["output"],
+                            "error": "Invalid runner response",
+                        }
+
             return {
                 "success": False,
-                "output": "",
-                "error": f"代码执行超时 (>{self.timeout}秒)"
+                "output": raw["output"] or "",
+                "error": raw["error"]
+                or f"Python exited with code {raw.get('returncode')}",
             }
         except Exception as e:
+            return {"success": False, "output": "", "error": str(e)}
+        finally:
+            if code_path is not None:
+                try:
+                    os.unlink(code_path)
+                except OSError:
+                    pass
+
+    async def _run_nodejs(self, code: str) -> Dict[str, Any]:
+        path = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".js",
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                f.write(code)
+                path = f.name
+
+            raw = await self._run_job(
+                ["node", path],
+                f"Node.js execution timed out (>{self.timeout}s)",
+            )
             return {
-                "success": False,
-                "output": "",
-                "error": str(e)
+                "success": raw["success"],
+                "output": raw["output"] or "",
+                "error": raw["error"],
             }
+        except Exception as e:
+            return {"success": False, "output": "", "error": str(e)}
+        finally:
+            if path is not None:
+                try:
+                    os.unlink(path)
+                except OSError:
+                    pass
+
+    async def execute(self, code: str, language: str = "python3") -> Dict[str, Any]:
+        if language == "python3":
+            return await self._run_python(code)
+        if language == "nodejs":
+            if not self.nodejs_available:
+                return {
+                    "success": False,
+                    "output": "",
+                    "error": "Node.js not available",
+                }
+            return await self._run_nodejs(code)
+        return {
+            "success": False,
+            "output": "",
+            "error": f"Unsupported language: {language}",
+        }
