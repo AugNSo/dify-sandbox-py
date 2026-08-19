@@ -2,4 +2,12 @@ fastapi
 uvicorn
 starlette
 pydantic
+httpx
+requests
 jinja2
+PySocks
+httpx[socks]
+pandas
+json_repair
+sqlglot
+pyyaml
