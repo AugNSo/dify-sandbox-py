@@ -6,7 +6,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any
 
 _RUNNER_PATH = str(Path(__file__).with_name("python_runner.py"))
 
@@ -23,7 +23,7 @@ def _pdeathsig() -> None:
         pass
 
 
-def _apply_memory_limit(max_memory_bytes: Optional[int]) -> None:
+def _apply_memory_limit(max_memory_bytes: int | None) -> None:
     if not max_memory_bytes:
         return
     try:
@@ -36,7 +36,7 @@ def _apply_memory_limit(max_memory_bytes: Optional[int]) -> None:
         pass
 
 
-def _job_preexec(max_memory_bytes: Optional[int] = None):
+def _job_preexec(max_memory_bytes: int | None = None):
     def _inner() -> None:
         _pdeathsig()
         _apply_memory_limit(max_memory_bytes)
@@ -44,7 +44,7 @@ def _job_preexec(max_memory_bytes: Optional[int] = None):
     return _inner
 
 
-def _kill_process_group(pid: Optional[int]) -> None:
+def _kill_process_group(pid: int | None) -> None:
     if pid is None:
         return
     try:
@@ -73,14 +73,14 @@ class CodeExecutor:
     def __init__(
         self,
         timeout: int = 30,
-        max_memory_mb: Optional[int] = None,
+        max_memory_mb: int | None = None,
     ):
         self.timeout = timeout
         self.max_memory_bytes = (
             int(max_memory_mb) * 1024 * 1024 if max_memory_mb else None
         )
         self.nodejs_available = check_nodejs_available()
-        self._procs: Set[asyncio.subprocess.Process] = set()
+        self._procs: set[asyncio.subprocess.Process] = set()
         self._lock = asyncio.Lock()
 
     async def shutdown(self) -> None:
@@ -106,7 +106,7 @@ class CodeExecutor:
         self,
         args: list,
         timeout_message: str,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -155,7 +155,7 @@ class CodeExecutor:
             "returncode": proc.returncode,
         }
 
-    async def _run_python(self, code: str) -> Dict[str, Any]:
+    async def _run_python(self, code: str) -> dict[str, Any]:
         code_path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -212,7 +212,7 @@ class CodeExecutor:
                 except OSError:
                     pass
 
-    async def _run_nodejs(self, code: str) -> Dict[str, Any]:
+    async def _run_nodejs(self, code: str) -> dict[str, Any]:
         path = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -242,7 +242,7 @@ class CodeExecutor:
                 except OSError:
                     pass
 
-    async def execute(self, code: str, language: str = "python3") -> Dict[str, Any]:
+    async def execute(self, code: str, language: str = "python3") -> dict[str, Any]:
         if language == "python3":
             return await self._run_python(code)
         if language == "nodejs":

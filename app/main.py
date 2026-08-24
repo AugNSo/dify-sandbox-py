@@ -1,7 +1,6 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from typing import Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel
@@ -17,7 +16,7 @@ WORKER_TIMEOUT = int(os.getenv("WORKER_TIMEOUT", "15"))
 _max_memory_raw = os.getenv("MAX_MEMORY_MB", "").strip()
 MAX_MEMORY_MB = int(_max_memory_raw) if _max_memory_raw else None
 
-executor: Optional[CodeExecutor] = None
+executor: CodeExecutor | None = None
 
 
 @asynccontextmanager
@@ -41,8 +40,8 @@ app = FastAPI(lifespan=lifespan)
 class CodeRequest(BaseModel):
     language: str
     code: str
-    preload: Optional[str] = ""
-    enable_network: Optional[bool] = False
+    preload: str | None = ""
+    enable_network: bool | None = False
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
