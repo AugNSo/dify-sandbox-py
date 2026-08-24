@@ -11,3 +11,4 @@ pandas
 json_repair
 sqlglot
 pyyaml
+Pillow
